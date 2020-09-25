@@ -110,7 +110,8 @@ def train(args):
         scheduler = WarmupConstantSchedule(optimizer, warmup_steps=args.warmup_steps)
     elif args.lr_schedule == 'warmup_linear':
         max_steps = int(args.n_epochs * (dataset.train_size() / args.batch_size))
-        scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=max_steps)
+        CODAH_warmup_steps = int(0.06 * max_steps)
+        scheduler = WarmupLinearSchedule(optimizer, warmup_steps=CODAH_warmup_steps, t_total=max_steps)
 
     if args.loss == 'margin_rank':
         loss_func = torch.nn.MarginRankingLoss(margin=0.1, reduction='mean')
