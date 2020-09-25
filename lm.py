@@ -161,11 +161,8 @@ def train(args):
                         if args.loss == 'margin_rank':
                             num_choice = logits.size(1)
                             flat_logits = logits.view(-1)
-                            correct_mask = F.one_hot(labels, num_classes=num_choice).view(
-                                -1)  # of length batch_size*num_choice
-                            correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1,
-                                                                                                            num_choice - 1).contiguous().view(
-                                -1)  # of length batch_size*(num_choice-1)
+                            correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
+                            correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
                             wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
                             y = wrong_logits.new_ones((wrong_logits.size(0),))
                             loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
