@@ -15,6 +15,9 @@ ENCODER_DEFAULT_LR = {
         'bert-base-cased': 1e-4,
         'bert-large-cased': 1e-4,
         'roberta-large': 1e-5,
+    },
+    'codah': {
+        'roberta-large': 1e-5,
     }
 }
 
@@ -24,6 +27,7 @@ DATASET_SETTING = {
     'csqa': 'inhouse',
     'obqa': 'official',
     'socialiqa': 'official',
+    'codah': 'official'
 }
 
 DATASET_NO_TEST = ['socialiqa']
@@ -62,7 +66,7 @@ def add_data_arguments(parser):
     for split in data_splits:
         for attribute in ('statements',):
             attr_name = f'{split}_{attribute}'
-            parser.set_defaults(**{attr_name: getattr(args, attr_name).format(dataset=args.dataset)})
+            parser.set_defaults(**{attr_name: getattr(args, attr_name).format(fold=args.fold, dataset=args.dataset)})
     if 'test' not in data_splits:
         parser.set_defaults(test_statements=None)
 

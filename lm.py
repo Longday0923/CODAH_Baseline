@@ -61,7 +61,7 @@ def train(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available() and args.cuda:
+    if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
 
     model_path = os.path.join(args.save_dir, 'model.pt')
@@ -71,8 +71,8 @@ def train(args):
     #   Load data                                                                                     #
     ###################################################################################################
 
-    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() and args.cuda else "cpu")
-
+    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() else "cpu")
+    print(device)
     dataset = LMDataLoader(args.train_statements, args.dev_statements, args.test_statements,
                            batch_size=args.batch_size, eval_batch_size=args.eval_batch_size, device=device,
                            model_name=args.encoder,
@@ -217,7 +217,7 @@ def extract(args):  # Note: extract mode ALWAYS use the official split
                                                                                  encoder_name=old_args.encoder_name,
                                                                                  layer_id=args.layer_id))
 
-    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
     encoder = model.encoder
@@ -246,7 +246,7 @@ def extract(args):  # Note: extract mode ALWAYS use the official split
 def eval(args):
     model_path = os.path.join(args.save_dir, 'model.pt')
     model, old_args = torch.load(model_path)
-    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
 
@@ -270,7 +270,7 @@ def pred(args):  # Note: pred mode ALWAYS uses the official split
     test_pred_path = os.path.join(args.save_dir, 'predictions_test.csv')
     model_path = os.path.join(args.save_dir, 'model.pt')
     old_args, model = torch.load(model_path)
-    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() else "cpu")
     model.to(device)
     model.eval()
 
