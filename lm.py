@@ -3,7 +3,8 @@ import random
 import numpy as np
 import torch.nn.functional as F
 from tqdm import tqdm
-from transformers import WarmupLinearSchedule, WarmupConstantSchedule, ConstantLRSchedule
+from transformers import (ConstantLRSchedule, WarmupLinearSchedule, WarmupConstantSchedule)
+from torch.cuda.amp import GradScaler, autocast
 
 from modeling.modeling_lm import *
 from utils.optimization_utils import OPTIMIZER_CLASSES
@@ -33,7 +34,8 @@ def main():
     # optimization
     parser.add_argument('-ebs', "--eval_batch_size", default=8, type=int, help="Total batch size for eval.")
     parser.add_argument('-mbs', '--mini_batch_size', type=int, default=2)
-
+    parser.add_argument('--no_fp16', action='store_true',
+                        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
     # feature extraction (used only in extract mode)
     parser.add_argument('--layer_id', default=-2, type=int, help='hidden states of layer to extract')
     args, _ = parser.parse_known_args()
@@ -69,7 +71,7 @@ def train(args):
     #   Load data                                                                                     #
     ###################################################################################################
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() and args.cuda else "cpu")
 
     dataset = LMDataLoader(args.train_statements, args.dev_statements, args.test_statements,
                            batch_size=args.batch_size, eval_batch_size=args.eval_batch_size, device=device,
@@ -100,7 +102,8 @@ def train(args):
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'lr': args.encoder_lr, 'weight_decay': 0.0}
     ]
     optimizer = OPTIMIZER_CLASSES[args.optim](grouped_parameters)
-
+    if not args.no_fp16:
+        scaler = GradScaler()
     if args.lr_schedule == 'fixed':
         scheduler = ConstantLRSchedule(optimizer)
     elif args.lr_schedule == 'warmup_constant':
@@ -110,9 +113,9 @@ def train(args):
         scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=max_steps)
 
     if args.loss == 'margin_rank':
-        loss_func = nn.MarginRankingLoss(margin=0.1, reduction='mean')
+        loss_func = torch.nn.MarginRankingLoss(margin=0.1, reduction='mean')
     elif args.loss == 'cross_entropy':
-        loss_func = nn.CrossEntropyLoss(reduction='mean')
+        loss_func = torch.nn.CrossEntropyLoss(reduction='mean')
 
     ###################################################################################################
     #   Training                                                                                      #
@@ -137,23 +140,47 @@ def train(args):
                 bs = labels.size(0)
                 for a in range(0, bs, args.mini_batch_size):
                     b = min(a + args.mini_batch_size, bs)
-                    logits = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
-                    if args.loss == 'margin_rank':
-                        num_choice = logits.size(1)
-                        flat_logits = logits.view(-1)
-                        correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
-                        correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
-                        wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
-                        y = wrong_logits.new_ones((wrong_logits.size(0),))
-                        loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
-                    elif args.loss == 'cross_entropy':
-                        loss = loss_func(logits, labels[a:b])
-                    loss = loss * (b - a) / bs
-                    loss.backward()
-                    batch_loss += loss.item()
+                    if not args.no_fp16:
+                        with autocast():
+                            logits = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                            if args.loss == 'margin_rank':
+                                num_choice = logits.size(1)
+                                flat_logits = logits.view(-1)
+                                correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
+                                correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
+                                wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
+                                y = wrong_logits.new_ones((wrong_logits.size(0),))
+                                loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
+                            elif args.loss == 'cross_entropy':
+                                loss = loss_func(logits, labels[a:b])
+                            loss = loss * (b - a) / bs
+                        scaler.scale(loss).backward()
+                    else:
+                        logits = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                        if args.loss == 'margin_rank':
+                            num_choice = logits.size(1)
+                            flat_logits = logits.view(-1)
+                            correct_mask = F.one_hot(labels, num_classes=num_choice).view(
+                                -1)  # of length batch_size*num_choice
+                            correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1,
+                                                                                                            num_choice - 1).contiguous().view(
+                                -1)  # of length batch_size*(num_choice-1)
+                            wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
+                            y = wrong_logits.new_ones((wrong_logits.size(0),))
+                            loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
+                        elif args.loss == 'cross_entropy':
+                            loss = loss_func(logits, labels[a:b])
+                        loss = loss * (b - a) / bs
+                        loss.backward()
                 if args.max_grad_norm > 0:
-                    nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                optimizer.step()
+                    if not args.no_fp16:
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                if not args.no_fp16:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 scheduler.step()
                 tqdm_bar.desc = "loss: {:.2e}  lr: {:.2e}".format(batch_loss, scheduler.get_lr()[0])
                 global_step += 1
@@ -189,7 +216,7 @@ def extract(args):  # Note: extract mode ALWAYS use the official split
                                                                                  encoder_name=old_args.encoder_name,
                                                                                  layer_id=args.layer_id))
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() and args.cuda else "cpu")
     model.to(device)
     model.eval()
     encoder = model.encoder
@@ -218,7 +245,7 @@ def extract(args):  # Note: extract mode ALWAYS use the official split
 def eval(args):
     model_path = os.path.join(args.save_dir, 'model.pt')
     model, old_args = torch.load(model_path)
-    device = torch.device("cuda:0" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() and args.cuda else "cpu")
     model.to(device)
     model.eval()
 
@@ -242,7 +269,7 @@ def pred(args):  # Note: pred mode ALWAYS uses the official split
     test_pred_path = os.path.join(args.save_dir, 'predictions_test.csv')
     model_path = os.path.join(args.save_dir, 'model.pt')
     old_args, model = torch.load(model_path)
-    device = torch.device("cuda:0" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda:"+str(args.cuda) if torch.cuda.is_available() and args.cuda else "cpu")
     model.to(device)
     model.eval()
 
