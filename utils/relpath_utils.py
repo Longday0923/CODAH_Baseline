@@ -47,7 +47,8 @@ def find_paths_qa_concept_pair(source: str, target: str, ifprint=False):
         return []
 
     all_path = []
-    for p in nx.all_simple_paths(cpnet_simple, source=s, target=t, cutoff=2):
+    for p in nx.all_simple_paths(cpnet_simple, source=s, target=t, cutoff=1):
+        # cutoff = 1hop(1) 2hop(2)
         if len(p) >= 2:  # skip paths of length 1
             all_path.append(p)
 
@@ -104,7 +105,8 @@ def find_relational_paths(cpnet_vocab_path, cpnet_graph_path, grounded_path, out
     data = [[item["ac"], item["qc"]] for item in data]
 
     with Pool(num_processes) as p, open(output_path, 'w') as fout:
-        for pfr_qa in tqdm(p.imap(find_relational_paths_qa_pair, data), total=len(data), desc='Finding relational paths'):
+        for pfr_qa in tqdm(p.imap(find_relational_paths_qa_pair, data), total=len(data),
+                           desc='Finding relational paths'):
             fout.write(json.dumps(pfr_qa) + '\n')
 
     print(f'paths saved to {output_path}')
@@ -143,7 +145,8 @@ def find_relational_paths(cpnet_vocab_path, cpnet_graph_path, grounded_path, out
     data = [[item["ac"], item["qc"]] for item in data]
 
     with Pool(num_processes) as p, open(output_path, 'w') as fout:
-        for pfr_qa in tqdm(p.imap(find_relational_paths_qa_pair, data), total=len(data), desc='Finding relational paths'):
+        for pfr_qa in tqdm(p.imap(find_relational_paths_qa_pair, data), total=len(data),
+                           desc='Finding relational paths'):
             fout.write(json.dumps(pfr_qa) + '\n')
 
     print(f'paths saved to {output_path}')
