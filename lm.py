@@ -201,11 +201,11 @@ def train(args):
         print(e)
 
     print('***** training ends *****')
-    print()
-    print('training ends in {} steps'.format(global_step))
-    print('best dev acc: {:.4f} (at epoch {})'.format(best_dev_acc, best_dev_epoch))
-    print('final test acc: {:.4f}'.format(final_test_acc))
-    print()
+    # print()
+    # print('training ends in {} steps'.format(global_step))
+    # print('best dev acc: {:.4f} (at epoch {})'.format(best_dev_acc, best_dev_epoch))
+    # print('final test acc: {:.4f}'.format(final_test_acc))
+    # print()
 
 
 def extract(args):  # Note: extract mode ALWAYS use the official split
