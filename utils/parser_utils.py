@@ -91,7 +91,7 @@ def add_optimization_arguments(parser):
     parser.add_argument('--lr_schedule', default='warmup_linear', choices=['fixed', 'warmup_linear', 'warmup_constant'], help='learning rate scheduler')
     parser.add_argument('-bs', '--batch_size', default=16, type=int)
     parser.add_argument('--warmup_steps', type=float, default=150)
-    parser.add_argument('--max_grad_norm', default=1.0, type=float, help='max grad norm (0 to disable)')
+    parser.add_argument('--max_grad_norm', default=0, type=float, help='max grad norm (0 to disable)')
     parser.add_argument('--weight_decay', default=1e-2, type=float, help='l2 weight decay strength')
     parser.add_argument('--n_epochs', default=5, type=int, help='total number of training epochs to perform.')
     parser.add_argument('-me', '--max_epochs_before_stop', default=5, type=int, help='stop training if dev does not increase for N epochs')
