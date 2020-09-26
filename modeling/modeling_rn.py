@@ -180,9 +180,9 @@ class LMRelationNetDataLoader(object):
             assert all(len(self.test_qids) == x.size(0) for x in [self.test_labels] + self.test_data)
 
         num_tuple_idx = -2 if use_contextualized else -1
-        print('| train_num_tuples = {:.2f} | dev_num_tuples = {:.2f} | test_num_tuples = {:.2f} |'.format(self.train_data[num_tuple_idx].float().mean(),
-                                                                                                          self.dev_data[num_tuple_idx].float().mean(),
-                                                                                                          self.test_data[num_tuple_idx].float().mean() if test_statement_path else 0))
+        # print('| train_num_tuples = {:.2f} | dev_num_tuples = {:.2f} | test_num_tuples = {:.2f} |'.format(self.train_data[num_tuple_idx].float().mean(),
+        #                                                                                                   self.dev_data[num_tuple_idx].float().mean(),
+        #                                                                                                   self.test_data[num_tuple_idx].float().mean() if test_statement_path else 0))
 
         if self.is_inhouse:
             with open(inhouse_train_qids_path, 'r') as fin:

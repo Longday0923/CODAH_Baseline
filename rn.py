@@ -1,7 +1,8 @@
 import random
 from multiprocessing import cpu_count
-
+import torch.nn.functional as F
 from transformers import (ConstantLRSchedule, WarmupLinearSchedule, WarmupConstantSchedule)
+from torch.cuda.amp import GradScaler, autocast
 
 from modeling.modeling_rn import *
 from utils.optimization_utils import OPTIMIZER_CLASSES
@@ -43,25 +44,25 @@ def main():
     parser.add_argument('-p', '--nprocs', type=int, default=cpu_count(), help='number of processes to use')
 
     # data
-    parser.add_argument('--train_rel_paths', default=f'./data/{args.dataset}/paths/train.relpath.2hop.jsonl')
-    parser.add_argument('--dev_rel_paths', default=f'./data/{args.dataset}/paths/dev.relpath.2hop.jsonl')
-    parser.add_argument('--test_rel_paths', default=f'./data/{args.dataset}/paths/test.relpath.2hop.jsonl')
-    parser.add_argument('--train_adj', default=f'./data/{args.dataset}/graph/train.graph.adj.pk')
-    parser.add_argument('--dev_adj', default=f'./data/{args.dataset}/graph/dev.graph.adj.pk')
-    parser.add_argument('--test_adj', default=f'./data/{args.dataset}/graph/test.graph.adj.pk')
-    parser.add_argument('--train_node_features', default=f'./data/{args.dataset}/features/train.{get_node_feature_encoder(args.encoder)}.features.pk')
-    parser.add_argument('--dev_node_features', default=f'./data/{args.dataset}/features/dev.{get_node_feature_encoder(args.encoder)}.features.pk')
-    parser.add_argument('--test_node_features', default=f'./data/{args.dataset}/features/test.{get_node_feature_encoder(args.encoder)}.features.pk')
-    parser.add_argument('--train_concepts', default=f'./data/{args.dataset}/grounded/train.grounded.jsonl')
-    parser.add_argument('--dev_concepts', default=f'./data/{args.dataset}/grounded/dev.grounded.jsonl')
-    parser.add_argument('--test_concepts', default=f'./data/{args.dataset}/grounded/test.grounded.jsonl')
+    parser.add_argument('--train_rel_paths', default=f'./data/{args.dataset}/fold_{args.fold}/paths/train.relpath.2hop.jsonl')
+    parser.add_argument('--dev_rel_paths', default=f'./data/{args.dataset}/fold_{args.fold}/paths/dev.relpath.2hop.jsonl')
+    parser.add_argument('--test_rel_paths', default=f'./data/{args.dataset}/fold_{args.fold}/paths/test.relpath.2hop.jsonl')
+    parser.add_argument('--train_adj', default=f'./data/{args.dataset}/fold_{args.fold}/graph/train.graph.adj.pk')
+    parser.add_argument('--dev_adj', default=f'./data/{args.dataset}/fold_{args.fold}/graph/dev.graph.adj.pk')
+    parser.add_argument('--test_adj', default=f'./data/{args.dataset}/fold_{args.fold}/graph/test.graph.adj.pk')
+    parser.add_argument('--train_node_features', default=f'./data/{args.dataset}/fold_{args.fold}/features/train.{get_node_feature_encoder(args.encoder)}.features.pk')
+    parser.add_argument('--dev_node_features', default=f'./data/{args.dataset}/fold_{args.fold}/features/dev.{get_node_feature_encoder(args.encoder)}.features.pk')
+    parser.add_argument('--test_node_features', default=f'./data/{args.dataset}/fold_{args.fold}/features/test.{get_node_feature_encoder(args.encoder)}.features.pk')
+    parser.add_argument('--train_concepts', default=f'./data/{args.dataset}/fold_{args.fold}/grounded/train.grounded.jsonl')
+    parser.add_argument('--dev_concepts', default=f'./data/{args.dataset}/fold_{args.fold}/grounded/dev.grounded.jsonl')
+    parser.add_argument('--test_concepts', default=f'./data/{args.dataset}/fold_{args.fold}/grounded/test.grounded.jsonl')
 
     parser.add_argument('--node_feature_type', choices=['full', 'cls', 'mention'])
     parser.add_argument('--use_cache', default=True, type=bool_flag, nargs='?', const=True, help='use cached data to accelerate data loading')
     parser.add_argument('--max_tuple_num', default=200, type=int)
 
     # model architecture
-    parser.add_argument('--ablation', default=None, choices=['None', 'no_kg', 'no_2hop', 'no_1hop', 'no_qa', 'no_rel',
+    parser.add_argument('--ablation', default='multihead_pool', choices=['None', 'no_kg', 'no_2hop', 'no_1hop', 'no_qa', 'no_rel',
                                                              'mrloss', 'fixrel', 'fakerel', 'no_factor_mul', 'no_2hop_qa',
                                                              'randomrel', 'encode_qas', 'multihead_pool', 'att_pool'], nargs='?', const=None, help='run ablation test')
     parser.add_argument('--att_head_num', default=2, type=int, help='number of attention heads')
@@ -82,6 +83,8 @@ def main():
     parser.add_argument('-ebs', '--eval_batch_size', default=4, type=int)
     parser.add_argument('--unfreeze_epoch', default=0, type=int)
     parser.add_argument('--refreeze_epoch', default=10000, type=int)
+    parser.add_argument('--no_fp16', action='store_true',
+                        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
 
     parser.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS, help='show this help message and exit')
     args = parser.parse_args()
@@ -109,12 +112,12 @@ def main():
 
 
 def train(args):
-    print(args)
+    # print(args)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available() and args.cuda:
+    if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
 
     config_path = os.path.join(args.save_dir, 'config.json')
@@ -146,7 +149,7 @@ def train(args):
     relation_num, relation_dim = rel_emb.size(0), rel_emb.size(1)
     # print('| num_concepts: {} | num_relations: {} |'.format(concept_num, relation_num))
 
-    device = torch.device("cuda:0" if torch.cuda.is_available() and args.cuda else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     dataset = LMRelationNetDataLoader(args.train_statements, args.train_rel_paths,
                                       args.dev_statements, args.dev_rel_paths,
@@ -192,28 +195,30 @@ def train(args):
         {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': args.decoder_lr},
     ]
     optimizer = OPTIMIZER_CLASSES[args.optim](grouped_parameters)
-
+    if not args.no_fp16:
+        scaler = GradScaler()
     if args.lr_schedule == 'fixed':
         scheduler = ConstantLRSchedule(optimizer)
     elif args.lr_schedule == 'warmup_constant':
         scheduler = WarmupConstantSchedule(optimizer, warmup_steps=args.warmup_steps)
     elif args.lr_schedule == 'warmup_linear':
         max_steps = int(args.n_epochs * (dataset.train_size() / args.batch_size))
-        scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=max_steps)
+        CODAH_warmup_steps = int(0.06 * max_steps)
+        scheduler = WarmupLinearSchedule(optimizer, warmup_steps=CODAH_warmup_steps, t_total=max_steps)
 
-    print('parameters:')
-    for name, param in model.decoder.named_parameters():
-        if param.requires_grad:
-            print('\t{:45}\ttrainable\t{}'.format(name, param.size()))
-        else:
-            print('\t{:45}\tfixed\t{}'.format(name, param.size()))
-    num_params = sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
-    print('\ttotal:', num_params)
+    # print('parameters:')
+    # for name, param in model.decoder.named_parameters():
+    #     if param.requires_grad:
+    #         print('\t{:45}\ttrainable\t{}'.format(name, param.size()))
+    #     else:
+    #         print('\t{:45}\tfixed\t{}'.format(name, param.size()))
+    # num_params = sum(p.numel() for p in model.decoder.parameters() if p.requires_grad)
+    # print('\ttotal:', num_params)
 
     if args.loss == 'margin_rank':
-        loss_func = nn.MarginRankingLoss(margin=0.1, reduction='mean')
+        loss_func = torch.nn.MarginRankingLoss(margin=0.1, reduction='mean')
     elif args.loss == 'cross_entropy':
-        loss_func = nn.CrossEntropyLoss(reduction='mean')
+        loss_func = torch.nn.CrossEntropyLoss(reduction='mean')
 
     ###################################################################################################
     #   Training                                                                                      #
@@ -242,32 +247,53 @@ def train(args):
                 bs = labels.size(0)
                 for a in range(0, bs, args.mini_batch_size):
                     b = min(a + args.mini_batch_size, bs)
-                    logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
-
-                    if args.loss == 'margin_rank':
-                        num_choice = logits.size(1)
-                        flat_logits = logits.view(-1)
-                        correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
-                        correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
-                        wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
-                        y = wrong_logits.new_ones((wrong_logits.size(0),))
-                        loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
-                    elif args.loss == 'cross_entropy':
-                        loss = loss_func(logits, labels[a:b])
-                    loss = loss * (b - a) / bs
-                    loss.backward()
+                    if not args.no_fp16:
+                        with autocast():
+                            logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                            if args.loss == 'margin_rank':
+                                num_choice = logits.size(1)
+                                flat_logits = logits.view(-1)
+                                correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
+                                correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
+                                wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
+                                y = wrong_logits.new_ones((wrong_logits.size(0),))
+                                loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
+                            elif args.loss == 'cross_entropy':
+                                loss = loss_func(logits, labels[a:b])
+                            loss = loss * (b - a) / bs
+                        scaler.scale(loss).backward()
+                    else:
+                        logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                        if args.loss == 'margin_rank':
+                            num_choice = logits.size(1)
+                            flat_logits = logits.view(-1)
+                            correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
+                            correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1,num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
+                            wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
+                            y = wrong_logits.new_ones((wrong_logits.size(0),))
+                            loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
+                        elif args.loss == 'cross_entropy':
+                            loss = loss_func(logits, labels[a:b])
+                        loss = loss * (b - a) / bs
+                        loss.backward()
                     total_loss += loss.item()
                 if args.max_grad_norm > 0:
-                    nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    if not args.no_fp16:
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 rel_grad.append(model.decoder.rel_emb.weight.grad.abs().mean().item())
                 linear_grad.append(model.decoder.mlp.layers[8].weight.grad.abs().mean().item())
                 scheduler.step()
-                optimizer.step()
+                if not args.no_fp16:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
 
                 if (global_step + 1) % args.log_interval == 0:
                     total_loss /= args.log_interval
                     ms_per_batch = 1000 * (time.time() - start_time) / args.log_interval
-                    print('| step {:5} |  lr: {:9.7f} | loss {:7.4f} | ms/batch {:7.2f} |'.format(global_step, scheduler.get_lr()[0], total_loss, ms_per_batch))
+                    # print('| step {:5} |  lr: {:9.7f} | loss {:7.4f} | ms/batch {:7.2f} |'.format(global_step, scheduler.get_lr()[0], total_loss, ms_per_batch))
                     # print('| rel_grad: {:1.2e} | linear_grad: {:1.2e} |'.format(sum(rel_grad) / len(rel_grad), sum(linear_grad) / len(linear_grad)))
                     total_loss = 0
                     rel_grad = []
@@ -280,7 +306,7 @@ def train(args):
             test_acc = evaluate_accuracy(dataset.test(), model) if args.test_statements else 0.0
             print('-' * 71)
             print('| epoch {:5} | dev_acc {:7.4f} | test_acc {:7.4f} |'.format(epoch_id, dev_acc, test_acc))
-            print('-' * 71)
+            # print('-' * 71)
             with open(log_path, 'a') as fout:
                 fout.write('{},{},{}\n'.format(global_step, dev_acc, test_acc))
             if dev_acc >= best_dev_acc:
@@ -288,7 +314,7 @@ def train(args):
                 final_test_acc = test_acc
                 best_dev_epoch = epoch_id
                 torch.save([model, args], model_path)
-                print(f'model saved to {model_path}')
+                # print(f'model saved to {model_path}')
             model.train()
             start_time = time.time()
             if epoch_id > args.unfreeze_epoch and epoch_id - best_dev_epoch >= args.max_epochs_before_stop:
@@ -296,11 +322,11 @@ def train(args):
     except (KeyboardInterrupt, RuntimeError) as e:
         print(e)
 
-    print()
-    print('training ends in {} steps'.format(global_step))
-    print('best dev acc: {:.4f} (at epoch {})'.format(best_dev_acc, best_dev_epoch))
-    print('final test acc: {:.4f}'.format(final_test_acc))
-    print()
+    # print()
+    # print('training ends in {} steps'.format(global_step))
+    # print('best dev acc: {:.4f} (at epoch {})'.format(best_dev_acc, best_dev_epoch))
+    # print('final test acc: {:.4f}'.format(final_test_acc))
+    # print()
 
 
 def eval(args):
