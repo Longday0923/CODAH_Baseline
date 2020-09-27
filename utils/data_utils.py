@@ -404,8 +404,8 @@ def load_adj_data(adj_pk_path, max_node_num, num_choice, emb_pk_path=None):
         concept_ids[idx, :num_concept] = torch.tensor(concepts)  # note : concept zero padding is disabled
 
         adj_lengths[idx] = num_concept
-        node_type_ids[idx, :num_concept][torch.tensor(qm, dtype=torch.uint8)[:num_concept]] = 0
-        node_type_ids[idx, :num_concept][torch.tensor(am, dtype=torch.uint8)[:num_concept]] = 1
+        # node_type_ids[idx, :num_concept][torch.tensor(qm, dtype=torch.uint8)[:num_concept]] = 0
+        # node_type_ids[idx, :num_concept][torch.tensor(am, dtype=torch.uint8)[:num_concept]] = 1
         ij = torch.tensor(adj.row, dtype=torch.int64)
         k = torch.tensor(adj.col, dtype=torch.int64)
         n_node = adj.shape[1]
@@ -416,10 +416,10 @@ def load_adj_data(adj_pk_path, max_node_num, num_choice, emb_pk_path=None):
         i, j, k = torch.cat((i, i + half_n_rel), 0), torch.cat((j, k), 0), torch.cat((k, j), 0)  # add inverse relations
         adj_data.append((i, j, k))  # i, j, k are the coordinates of adj's non-zero entries
 
-    print('| ori_adj_len: {:.2f} | adj_len: {:.2f} |'.format(adj_lengths_ori.float().mean().item(), adj_lengths.float().mean().item()) +
-          ' prune_rate： {:.2f} |'.format((adj_lengths_ori > adj_lengths).float().mean().item()) +
-          ' qc_num: {:.2f} | ac_num: {:.2f} |'.format((node_type_ids == 0).float().sum(1).mean().item(),
-                                                      (node_type_ids == 1).float().sum(1).mean().item()))
+    # print('| ori_adj_len: {:.2f} | adj_len: {:.2f} |'.format(adj_lengths_ori.float().mean().item(), adj_lengths.float().mean().item()) +
+    #       ' prune_rate： {:.2f} |'.format((adj_lengths_ori > adj_lengths).float().mean().item()) +
+    #       ' qc_num: {:.2f} | ac_num: {:.2f} |'.format((node_type_ids == 0).float().sum(1).mean().item(),
+    #                                                   (node_type_ids == 1).float().sum(1).mean().item()))
 
     concept_ids, node_type_ids, adj_lengths = [x.view(-1, num_choice, *x.size()[1:]) for x in (concept_ids, node_type_ids, adj_lengths)]
     if emb_pk_path is not None:
