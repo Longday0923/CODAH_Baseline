@@ -1,13 +1,14 @@
 import random
 
 from transformers import (ConstantLRSchedule, WarmupLinearSchedule, WarmupConstantSchedule)
-
+from torch.cuda.amp import GradScaler, autocast
+import torch.nn.functional as F
 from modeling.modeling_rgcn import *
 from utils.optimization_utils import OPTIMIZER_CLASSES
 from utils.parser_utils import *
 from utils.relpath_utils import *
 
-DECODER_DEFAULT_LR = {'csqa': 1e-3, 'obqa': 1e-3}
+DECODER_DEFAULT_LR = {'csqa': 1e-3, 'obqa': 1e-3, 'codah':3e-4}
 
 
 def evaluate_accuracy(eval_set, model):
@@ -30,9 +31,9 @@ def main():
     # data
     parser.add_argument('--cpnet_vocab_path', default='./data/cpnet/concept.txt')
     parser.add_argument('--num_relation', default=35, type=int, help='number of relations')
-    parser.add_argument('--train_adj', default=f'./data/{args.dataset}/graph/train.graph.adj.pk')
-    parser.add_argument('--dev_adj', default=f'./data/{args.dataset}/graph/dev.graph.adj.pk')
-    parser.add_argument('--test_adj', default=f'./data/{args.dataset}/graph/test.graph.adj.pk')
+    parser.add_argument('--train_adj', default=f'./data/{args.dataset}/fold_{args.fold}/graph/train.graph.adj.pk')
+    parser.add_argument('--dev_adj', default=f'./data/{args.dataset}/fold_{args.fold}/graph/dev.graph.adj.pk')
+    parser.add_argument('--test_adj', default=f'./data/{args.dataset}/fold_{args.fold}/graph/test.graph.adj.pk')
 
     # model architecture
     parser.add_argument('--ablation', default=[], choices=['no_node_type_emb', 'no_lm'], help='run ablation test')
@@ -54,6 +55,8 @@ def main():
     parser.add_argument('-ebs', '--eval_batch_size', default=4, type=int)
     parser.add_argument('--unfreeze_epoch', default=0, type=int)
     parser.add_argument('--refreeze_epoch', default=10000, type=int)
+    parser.add_argument('--no_fp16', action='store_true',
+                        help="Whether to use 16-bit (mixed) precision (through NVIDIA apex) instead of 32-bit")
 
     parser.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS, help='show this help message and exit')
     parser.add_argument('--save', type=bool_flag, default=False, help='whether to save logs and models')
@@ -77,7 +80,7 @@ def train(args):
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available() and args.cuda:
+    if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
 
     config_path = os.path.join(args.save_dir, 'config.json')
@@ -100,7 +103,8 @@ def train(args):
     print('num_concepts: {}, concept_dim: {}'.format(concept_num, concept_dim))
 
     try:
-        device = torch.device("cuda:0" if torch.cuda.is_available() and args.cuda else "cpu")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print('cuda:', device)
         dataset = LMRGCNDataLoader(train_statement_path=args.train_statements, train_adj_path=args.train_adj,
                                    dev_statement_path=args.dev_statements, dev_adj_path=args.dev_adj,
                                    test_statement_path=args.test_statements, test_adj_path=args.test_adj,
@@ -136,14 +140,16 @@ def train(args):
         {'params': [p for n, p in model.decoder.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0, 'lr': args.decoder_lr},
     ]
     optimizer = OPTIMIZER_CLASSES[args.optim](grouped_parameters)
-
+    if not args.no_fp16:
+        scaler = GradScaler()
     if args.lr_schedule == 'fixed':
         scheduler = ConstantLRSchedule(optimizer)
     elif args.lr_schedule == 'warmup_constant':
         scheduler = WarmupConstantSchedule(optimizer, warmup_steps=args.warmup_steps)
     elif args.lr_schedule == 'warmup_linear':
         max_steps = int(args.n_epochs * (dataset.train_size() / args.batch_size))
-        scheduler = WarmupLinearSchedule(optimizer, warmup_steps=args.warmup_steps, t_total=max_steps)
+        CODAH_warmup_steps = int(0.06 * max_steps)
+        scheduler = WarmupLinearSchedule(optimizer, warmup_steps=CODAH_warmup_steps, t_total=max_steps)
 
     print('parameters:')
     for name, param in model.decoder.named_parameters():
@@ -155,9 +161,9 @@ def train(args):
     print('\ttotal:', num_params)
 
     if args.loss == 'margin_rank':
-        loss_func = nn.MarginRankingLoss(margin=0.1, reduction='mean')
+        loss_func = torch.nn.MarginRankingLoss(margin=0.1, reduction='mean')
     elif args.loss == 'cross_entropy':
-        loss_func = nn.CrossEntropyLoss(reduction='mean')
+        loss_func = torch.nn.CrossEntropyLoss(reduction='mean')
 
     ###################################################################################################
     #   Training                                                                                      #
@@ -181,26 +187,49 @@ def train(args):
                 bs = labels.size(0)
                 for a in range(0, bs, args.mini_batch_size):
                     b = min(a + args.mini_batch_size, bs)
-                    logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
-
-                    if args.loss == 'margin_rank':
-                        num_choice = logits.size(1)
-                        flat_logits = logits.view(-1)
-                        correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
-                        correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
-                        wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
-                        y = wrong_logits.new_ones((wrong_logits.size(0),))
-                        loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
-                    elif args.loss == 'cross_entropy':
-
-                        loss = loss_func(logits, labels[a:b])
-                    loss = loss * (b - a) / bs
-                    loss.backward()
+                    if not args.no_fp16:
+                        with autocast():
+                            logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                            if args.loss == 'margin_rank':
+                                num_choice = logits.size(1)
+                                flat_logits = logits.view(-1)
+                                correct_mask = F.one_hot(labels, num_classes=num_choice).view(-1)  # of length batch_size*num_choice
+                                correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1, num_choice - 1).contiguous().view(-1)  # of length batch_size*(num_choice-1)
+                                wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
+                                y = wrong_logits.new_ones((wrong_logits.size(0),))
+                                loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
+                            elif args.loss == 'cross_entropy':
+                                loss = loss_func(logits, labels[a:b])
+                            loss = loss * (b - a) / bs
+                        scaler.scale(loss).backward()
+                    else:
+                        logits, _ = model(*[x[a:b] for x in input_data], layer_id=args.encoder_layer)
+                        if args.loss == 'margin_rank':
+                            num_choice = logits.size(1)
+                            flat_logits = logits.view(-1)
+                            correct_mask = F.one_hot(labels, num_classes=num_choice).view(
+                                -1)  # of length batch_size*num_choice
+                            correct_logits = flat_logits[correct_mask == 1].contiguous().view(-1, 1).expand(-1,
+                                                                                                            num_choice - 1).contiguous().view(
+                                -1)  # of length batch_size*(num_choice-1)
+                            wrong_logits = flat_logits[correct_mask == 0]  # of length batch_size*(num_choice-1)
+                            y = wrong_logits.new_ones((wrong_logits.size(0),))
+                            loss = loss_func(correct_logits, wrong_logits, y)  # margin ranking loss
+                        elif args.loss == 'cross_entropy':
+                            loss = loss_func(logits, labels[a:b])
+                        loss = loss * (b - a) / bs
+                        loss.backward()
                     total_loss += loss.item()
                 if args.max_grad_norm > 0:
-                    nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    if not args.no_fp16:
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
                 scheduler.step()
-                optimizer.step()
+                if not args.no_fp16:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
 
                 if (global_step + 1) % args.log_interval == 0:
                     total_loss /= args.log_interval
