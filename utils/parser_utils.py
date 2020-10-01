@@ -18,6 +18,8 @@ ENCODER_DEFAULT_LR = {
     },
     'codah': {
         'roberta-large': 1e-5,
+        'bert-large-uncased': 2e-5,
+        'bert-large-cased': 1e-4,
     }
 }
 
